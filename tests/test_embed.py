@@ -4,7 +4,7 @@ from pathlib import Path
 
 from tuc_archive.config import Site
 from tuc_archive.parser import ForumParser
-from tuc_archive.rewrite import LinkRewriter, PathMapper, rewrite_css
+from tuc_archive.rewrite import LinkRewriter, PathMapper, rewrite_css, scrub_pii_text
 
 FIX = Path(__file__).parent / "fixtures"
 SITE = Site(base_url="https://www.tuc.gr")
@@ -45,6 +45,28 @@ def test_no_redaction_by_default_keeps_obfuscated_token():
     rewriter = LinkRewriter(SITE, resolver=lambda u: None)  # redact_emails=False
     out = rewriter.rewrite(TOPIC_URL, html, PathMapper(SITE).page_path(TOPIC_URL))
     assert "data-mailto-token" in out  # obfuscated token preserved (site default)
+
+
+def test_scrub_pii_masks_structured_identifiers():
+    txt = ("Επικοινωνία: john.doe@example.gr τηλ 6970385377 και 2821037055, "
+           "ΑΜΚΑ 95405960393, IBAN GR36 0172 0000 0000 0000 0000 123.")
+    out = scrub_pii_text(txt)
+    assert "john.doe@example.gr" not in out and "[redacted-email]" in out
+    assert "6970385377" not in out and "2821037055" not in out
+    assert "[redacted-phone]" in out
+    assert "95405960393" not in out and "[redacted-id]" in out
+    assert "GR36 0172" not in out and "[redacted-iban]" in out
+    # ordinary short numbers (e.g. a topic count) survive
+    assert scrub_pii_text("Θέματα 438") == "Θέματα 438"
+
+
+def test_scrub_pii_applied_in_rewrite_when_enabled():
+    html = '<html><body><p>mail me at a.b@tuc.gr or 6970385377</p></body></html>'
+    url = "https://www.tuc.gr/el/to-polytechneio/nea-anakoinoseis-syzitiseis/topic/1/page"
+    rw = LinkRewriter(SITE, resolver=lambda u: None, scrub_pii=True)
+    out = rw.rewrite(url, html, PathMapper(SITE).page_path(url))
+    assert "a.b@tuc.gr" not in out and "6970385377" not in out
+    assert "[redacted-email]" in out and "[redacted-phone]" in out
 
 
 def test_subresources_extracted_same_origin():

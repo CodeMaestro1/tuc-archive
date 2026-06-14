@@ -82,10 +82,12 @@ class LinkRewriter:
     REWRITE_ATTRS = (("a", "href"), ("img", "src"), ("link", "href"),
                      ("script", "src"), ("source", "src"))
 
-    def __init__(self, site: Site, resolver, redact_emails: bool = False):
+    def __init__(self, site: Site, resolver, redact_emails: bool = False,
+                 scrub_pii: bool = False):
         self.site = site
         self.resolver = resolver  # callable(normalized_url) -> zim_path | None
         self.redact_emails = redact_emails
+        self.scrub_pii = scrub_pii
 
     def rewrite(self, page_url: str, html: str, current_zim_path: str) -> str:
         tree = HTMLParser(html)
@@ -112,6 +114,8 @@ class LinkRewriter:
                 # else: external resource — leave as-is (Kiwix blocks the network)
 
         html_out = tree.html or html
+        if self.scrub_pii:
+            html_out = scrub_pii_text(html_out)
         return html_out
 
     _PLACEHOLDER = "[email hidden]"
@@ -135,6 +139,33 @@ class LinkRewriter:
                     for a in ("data-mailto-token", "data-mailto-vector", "href"):
                         if a in node.attributes:
                             node.attrs[a] = ""
+
+
+# --------------------------------------------------------------------------- #
+# Best-effort PII scrubbing (data minimisation). Masks the *structured* personal
+# data that commonly appears free-typed in Greek university forum posts. Applied
+# to the serialised HTML; the patterns are length/format-anchored at word
+# boundaries, so they do not collide with the page's functional attributes
+# (hex cHash, base64 csrf, short numeric IDs).
+#
+# IMPORTANT LIMIT: this catches *formats*, not meaning. Names, addresses,
+# paraphrased identifiers and the contents of attachments are NOT removed. It
+# reduces exposure; it does not make a ZIM safe to publish without review.
+_PII_PATTERNS = (
+    # IBAN first (its digit runs would otherwise be partly eaten by the id rule).
+    (re.compile(r"\bGR\d{2}[\s\d]{16,30}\b"), "[redacted-iban]"),
+    (re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"), "[redacted-email]"),
+    (re.compile(r"\b69\d{8}\b"), "[redacted-phone]"),   # GR mobile
+    (re.compile(r"\b2\d{9}\b"), "[redacted-phone]"),    # GR landline
+    (re.compile(r"\b\d{11}\b"), "[redacted-id]"),       # AMKA-shaped
+)
+
+
+def scrub_pii_text(text: str) -> str:
+    """Mask emails / phone numbers / AMKA / IBAN in a string. Best-effort."""
+    for rx, repl in _PII_PATTERNS:
+        text = rx.sub(repl, text)
+    return text
 
 
 _CSS_URL_RX = re.compile(r"""url\(\s*['"]?([^'")]+)['"]?\s*\)""")

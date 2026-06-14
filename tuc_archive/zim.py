@@ -46,9 +46,9 @@ from zimscraperlib.zim.metadata import (
 )
 
 from .config import Settings
-from .rewrite import LinkRewriter, PathMapper, rewrite_css
+from .rewrite import LinkRewriter, PathMapper, rewrite_css, scrub_pii_text
 from .store import ContentStore
-from .utils import ScopeMatcher, normalize_url
+from .utils import ScopeMatcher, normalize_url, url_hash
 
 log = logging.getLogger("tuc.zim")
 
@@ -72,6 +72,24 @@ _HOMEPAGE = """<!doctype html><html lang="el"><head><meta charset="utf-8">
 margin:2rem auto;padding:0 1rem;color:#222}}h1{{color:#2c3e50}}
 li{{margin:.25rem 0}}</style></head><body>
 <h1>{title}</h1><p>{desc}</p><p>Αρχειοθετημένες σελίδες: <b>{n}</b></p>
+{authors}
+<ul>{items}</ul></body></html>"""
+
+_AUTHORS_INDEX = """<!doctype html><html lang="el"><head><meta charset="utf-8">
+<title>Συντάκτες</title><style>body{{font-family:sans-serif;max-width:780px;
+margin:2rem auto;padding:0 1rem;color:#222}}h1{{color:#2c3e50}}
+li{{margin:.2rem 0}}small{{color:#777}}</style></head><body>
+<p><a href="../index.html">← Αρχική</a></p>
+<h1>Συντάκτες ({n})</h1>
+<ul>{items}</ul></body></html>"""
+
+_AUTHOR_PAGE = """<!doctype html><html lang="el"><head><meta charset="utf-8">
+<title>Συντάκτης: {name}</title><style>body{{font-family:sans-serif;
+max-width:780px;margin:2rem auto;padding:0 1rem;color:#222}}h1{{color:#2c3e50}}
+li{{margin:.5rem 0}}small{{color:#777}}.ex{{color:#555;font-size:.9em}}</style>
+</head><body>
+<p><a href="{up}index.html">← Αρχική</a> · <a href="index.html">Όλοι οι συντάκτες</a></p>
+<h1>{name}</h1><p>Μηνύματα: <b>{n}</b></p>
 <ul>{items}</ul></body></html>"""
 
 
@@ -92,6 +110,7 @@ class ZimBuilder:
         self._page_paths: dict[str, str] = {}
         self._asset_paths: dict[str, str] = {}
         self._skipped = 0
+        self._scrub_pii = False  # set by build()
         for meta, _ in store.iter_pages():
             url = meta["url"]
             if self._filter.excluded(url):
@@ -107,11 +126,14 @@ class ZimBuilder:
 
     def build(self, zim_path: Path, title: str, description: str,
               language: str = "ell", main_url: str | None = None,
-              redact_emails: bool = False) -> Path:
+              redact_emails: bool = False, author_index: bool = False,
+              scrub_pii: bool = False) -> Path:
         zim_path = Path(zim_path)
         zim_path.parent.mkdir(parents=True, exist_ok=True)
+        self._scrub_pii = scrub_pii
 
-        rewriter = LinkRewriter(self.site, self._resolve, redact_emails=redact_emails)
+        rewriter = LinkRewriter(self.site, self._resolve,
+                                redact_emails=redact_emails, scrub_pii=scrub_pii)
 
         # pre-map assets (need their on-disk extension) ----------------------
         asset_files = list(self.store.iter_assets())
@@ -149,9 +171,12 @@ class ZimBuilder:
         with Creator(zim_path, main_path).config_metadata(metadata) as creator:
             n_pages = self._add_pages(creator, rewriter)
             n_assets = self._add_assets(creator, asset_files)
-            self._add_homepage(creator, title, description)
+            n_authors = self._add_author_index(creator) if author_index else 0
+            self._add_homepage(creator, title, description,
+                               with_authors=bool(n_authors))
 
-        log.info("ZIM done: %d pages, %d assets -> %s", n_pages, n_assets, zim_path)
+        log.info("ZIM done: %d pages, %d assets, %d author page(s) -> %s",
+                 n_pages, n_assets, n_authors, zim_path)
         self._verify(zim_path)
         return zim_path
 
@@ -258,13 +283,91 @@ class ZimBuilder:
                 log.warning("skip asset %s: %r", url, e)
         return n
 
-    def _add_homepage(self, creator: Creator, title: str, description: str):
+    # ------------------------------------------------------------------ #
+    def _author_slug(self, name: str) -> str:
+        """Stable, ZIM-safe path for an author page. ASCII-ish slug + short hash
+        (the hash guarantees uniqueness even for non-Latin / colliding names)."""
+        import re
+        base = re.sub(r"[^a-zA-Z0-9]+", "-", name).strip("-").lower() or "author"
+        return f"authors/{base[:40]}-{url_hash(name)[:6]}.html"
+
+    def _add_author_index(self, creator: Creator) -> int:
+        """Generate static per-author pages + an A–Z index, for browse-by-author.
+
+        Pure static HTML indexed by Kiwix, so the author's name is searchable and
+        their page lists every post we archived. Privacy note: this aggregates a
+        named person's whole posting history — only enable for archives you are
+        authorised to build that way (``--author-index``; off by default).
+        """
+        import html as _html
+        from collections import defaultdict
+
+        authors: dict[str, list[dict]] = defaultdict(list)
+        for meta, _ in self.store.iter_pages():
+            zpath = self._page_paths.get(meta["url"])
+            if zpath is None:
+                continue  # page filtered out of this build
+            ttl = meta.get("title") or meta["url"]
+            if self._scrub_pii:
+                ttl = scrub_pii_text(ttl)
+            for p in (meta.get("posts") or []):
+                a = (p.get("author") or "").strip()
+                if not a:
+                    continue
+                excerpt = (p.get("text_excerpt") or "")[:200]
+                if self._scrub_pii:
+                    excerpt = scrub_pii_text(excerpt)
+                authors[a].append({
+                    "zpath": zpath, "title": ttl,
+                    "ts": p.get("timestamp") or "",
+                    "excerpt": excerpt,
+                })
+        if not authors:
+            log.info("author-index requested but no post authors found; skipping")
+            return 0
+
+        slugs = {a: self._author_slug(a) for a in authors}
+        # per-author pages
+        for a, posts in sorted(authors.items()):
+            zpath = slugs[a]
+            up = "../" * zpath.count("/")
+            rows = "".join(
+                f'<li><a href="{up}{_html.escape(p["zpath"])}">{_html.escape(p["title"])}</a>'
+                f' <small>{_html.escape(p["ts"])}</small>'
+                f'<div class="ex">{_html.escape(p["excerpt"])}</div></li>'
+                for p in posts
+            )
+            page = _AUTHOR_PAGE.format(name=_html.escape(a), n=len(posts),
+                                      items=rows, up=up)
+            creator.add_item_for(path=zpath, title=f"Συντάκτης: {a}",
+                                 content=page.encode("utf-8"), mimetype="text/html",
+                                 is_front=True, duplicate_ok=True)
+        # A–Z index
+        idx_items = "".join(
+            f'<li><a href="{slugs[a].split("/")[-1]}">{_html.escape(a)}</a>'
+            f' <small>({len(authors[a])})</small></li>'
+            for a in sorted(authors)
+        )
+        idx = _AUTHORS_INDEX.format(n=len(authors), items=idx_items)
+        creator.add_item_for(path="authors/index.html", title="Συντάκτες",
+                             content=idx.encode("utf-8"), mimetype="text/html",
+                             is_front=True, duplicate_ok=True)
+        log.info("Author index: %d authors", len(authors))
+        return len(authors)
+
+    def _add_homepage(self, creator: Creator, title: str, description: str,
+                      with_authors: bool = False):
         items = "".join(
             f'<li><a href="{p}">{(self.store.page_meta(u) or {}).get("title") or u}</a></li>'
             for u, p in sorted(self._page_paths.items(), key=lambda kv: kv[1])
         )
+        authors_link = (
+            '<p><a href="authors/index.html"><b>Αναζήτηση ανά συντάκτη →</b></a></p>'
+            if with_authors else ""
+        )
         html = _HOMEPAGE.format(
-            title=title, desc=description, n=len(self._page_paths), items=items
+            title=title, desc=description, n=len(self._page_paths),
+            items=items, authors=authors_link,
         )
         creator.add_item_for(
             path="index.html", title=title, content=html.encode("utf-8"),

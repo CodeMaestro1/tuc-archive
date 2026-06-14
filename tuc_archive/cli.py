@@ -262,6 +262,20 @@ def build_zim(
         help="Remove author e-mails entirely (mailto tokens + visible text -> "
              "'[email hidden]'). Use before sharing the ZIM publicly.",
     ),
+    author_index: bool = typer.Option(
+        False, "--author-index",
+        help="Generate browse-by-author pages (A–Z index + one page per author "
+             "listing their posts), searchable in Kiwix. PRIVACY: aggregates a "
+             "named person's whole posting history — only for archives you are "
+             "authorised to build that way. Off by default.",
+    ),
+    scrub_pii: bool = typer.Option(
+        False, "--scrub-pii",
+        help="Best-effort data minimisation: mask emails, phone numbers, "
+             "AMKA and IBANs found in post text. Catches FORMATS, not meaning — "
+             "names/addresses/attachment contents survive. Reduces exposure; "
+             "does NOT make a ZIM safe to publish unreviewed.",
+    ),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ):
     """Package the on-disk store into a Kiwix-compatible ZIM."""
@@ -271,9 +285,19 @@ def build_zim(
     s.output_dir = Path(output)
     store = ContentStore(s.output_dir / "store")
     zim_path = Path(zim) if zim else s.output_dir / "archive.zim"
+    if author_index:
+        console.print("[yellow]--author-index:[/] building a per-author directory "
+                      "(names + post history). Ensure you're authorised to publish "
+                      "this if you share the ZIM.")
+    if scrub_pii:
+        console.print("[yellow]--scrub-pii:[/] masking emails/phones/AMKA/IBAN in "
+                      "post text (format-based, best-effort — names and attachment "
+                      "contents are NOT removed).")
     builder = ZimBuilder(s, store, exclude=exclude)
     out = builder.build(zim_path, title=title, description=description,
-                        language=language, main_url=main_url, redact_emails=redact_emails)
+                        language=language, main_url=main_url,
+                        redact_emails=redact_emails, author_index=author_index,
+                        scrub_pii=scrub_pii)
     console.print(f"[green]ZIM written:[/] {out}")
     console.print(f"Open with:  kiwix-serve --port 8080 {out}")
 

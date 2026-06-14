@@ -170,6 +170,61 @@ tuc-archive build-zim ... --redact-emails      # remove e-mails entirely from th
 `--redact-emails` strips structured `mailto` tokens/links; free-text addresses
 typed into a post body are not caught (documented limit).
 
+### More privacy controls
+
+```bash
+# Best-effort data minimisation: mask emails / phones / AMKA / IBAN in post text.
+# Catches FORMATS, not meaning — names and attachment contents survive.
+tuc-archive build-zim ... --scrub-pii
+
+# Browse-by-author pages (A–Z index + one page per author), searchable in Kiwix.
+# PRIVACY: aggregates a person's whole posting history — off by default.
+tuc-archive build-zim ... --author-index
+
+# Drop forum-uploaded attachments entirely (opaque PDFs/scans you can't review):
+tuc-archive build-zim ... --exclude '/fileadmin/' --exclude '/uploads/'
+```
+
+None of these make a ZIM safe to publish unreviewed — see **Legal / ethical use**.
+
+---
+
+## Docker (standalone)
+
+Docker bundles all native deps (libzim, libmagic, libcairo) and — importantly —
+**builds large ZIMs reliably**. The Windows `libzim` wheel has a >2 GB
+finalization bug that silently produces a corrupt file; the Linux container does
+not, so for multi-GB archives **build the ZIM in Docker**. (The builder now
+reads every ZIM back after writing and *fails loudly* if it is unreadable, so a
+bad build can't pass silently.)
+
+```bash
+# 1. Build the image once (re-run after pulling code changes).
+docker build -t tuc-archive .
+
+# 2. Crawl one category into a host directory (bind-mount it as /data).
+#    --env-file passes the felogin creds; PowerShell: ${PWD}  cmd: %cd%  bash: $(pwd)
+docker run --rm --env-file .env -v "${PWD}/output-genika:/data" tuc-archive \
+  crawl "https://www.tuc.gr/el/to-polytechneio/nea-anakoinoseis-syzitiseis/cat/4/page" \
+  --output /data --category-only --workers 3 --delay 1 -v
+
+# 3. Build the ZIM from that store (reliable for multi-GB output).
+docker run --rm -v "${PWD}/output-genika:/data" tuc-archive \
+  build-zim --output /data --zim /data/genika.zim --title "Γενικά Μηνύματα" --language ell
+
+# 4. Serve it with Kiwix (no local install needed).
+docker run --rm -p 8080:8080 -v "${PWD}/output-genika:/data" \
+  ghcr.io/kiwix/kiwix-tools kiwix-serve --port 8080 /data/genika.zim
+# → open http://localhost:8080
+```
+
+Notes:
+- Put credentials in `.env`; pass it with `--env-file .env` (or rely on the
+  compose `env_file`). Never bake the password into the image.
+- The bind-mounted host dir holds the raw store + the `.zim`; it is git-ignored.
+- `resume` / `--retry-errors` / `--scrub-pii` / `--author-index` all work the
+  same way — just swap the subcommand after `tuc-archive` in step 2/3.
+
 ---
 
 ## Distributed mode (coordinator + workers)
