@@ -1,0 +1,59 @@
+# Distributed tuc-archive deployment:
+#   coordinator  – owns the queue + shared output volume (REST API :5555)
+#   worker       – scale with `docker compose up --scale worker=N`
+#   dashboard    – read-only progress UI (:8000)
+#   kiwix        – serve the produced ZIM (:8080), profile "serve"
+#
+# Standalone (no coordinator) usage is simpler — see README.
+services:
+  coordinator:
+    build: .
+    command: coordinator --host 0.0.0.0 --port 5555 --output /data --seed ${SEED_URL:-}
+    env_file: .env
+    ports:
+      - "5555:5555"
+    volumes:
+      - archive-data:/data
+
+  worker:
+    build: .
+    command: worker --coordinator-url http://coordinator:5555 --output /data --workers 4
+    env_file: .env
+    depends_on:
+      - coordinator
+    volumes:
+      - archive-data:/data
+    deploy:
+      replicas: 2
+
+  dashboard:
+    build: .
+    entrypoint: ["tuc-archive-dashboard"]
+    command: ["--state", "/data/state.yml", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "8000:8000"
+    volumes:
+      - archive-data:/data
+    depends_on:
+      - coordinator
+
+  # Build the ZIM on demand:  docker compose run --rm build-zim
+  build-zim:
+    build: .
+    profiles: ["tools"]
+    command: build-zim --output /data --zim /data/archive.zim --title "TUC Forum Archive"
+    volumes:
+      - archive-data:/data
+
+  # Serve the ZIM:  docker compose --profile serve up kiwix
+  kiwix:
+    image: ghcr.io/kiwix/kiwix-tools
+    profiles: ["serve"]
+    command: kiwix-serve --port 8080 /data/archive.zim
+    ports:
+      - "8080:8080"
+    volumes:
+      - archive-data:/data
+
+volumes:
+  archive-data:
