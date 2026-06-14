@@ -1,0 +1,37 @@
+# Normalize line endings: store text as LF in the repo AND check out LF on every
+# platform (incl. Windows). Stops the "LF will be replaced by CRLF" warning and
+# keeps the Docker/Linux build byte-identical to local files.
+* text=auto eol=lf
+
+# Explicit text types (belt-and-suspenders; eol inherited from above).
+*.py     text
+*.html   text
+*.css    text
+*.js     text
+*.md     text
+*.txt    text
+*.toml   text
+*.yml    text
+*.yaml   text
+*.cfg    text
+*.ini    text
+Dockerfile      text
+.gitignore      text
+.gitattributes  text
+.env.example    text
+LICENSE         text
+
+# Binary: never touch EOL / never diff as text.
+*.zim    binary
+*.png    binary
+*.jpg    binary
+*.jpeg   binary
+*.gif    binary
+*.ico    binary
+*.pdf    binary
+*.woff   binary
+*.woff2  binary
+*.ttf    binary
+*.eot    binary
+*.mp3    binary
+*.zip    binary

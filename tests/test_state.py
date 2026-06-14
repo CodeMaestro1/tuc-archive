@@ -51,6 +51,25 @@ def test_requeue_in_flight_recovers_interrupted_work():
     assert "a" not in s.pending  # already completed, not requeued
 
 
+def test_requeue_errors_reattempts_failures():
+    s = CrawlState()
+    s.add_many(["a", "b", "c"])
+    s.claim_batch(3)
+    s.complete(CompletedEntry("a", 200))
+    s.fail("b", "http-500")
+    s.fail("c", "http-500")
+    assert s.stats()["errors"] == 2
+    moved = s.requeue_errors()
+    assert moved == 2
+    assert s.stats()["errors"] == 0
+    assert "b" in s.pending and "c" in s.pending  # re-queued for retry
+    assert "a" not in s.pending                   # completed stays done
+    # a re-failure lands back in errors (still reachable for a later retry)
+    s.claim_batch(2)
+    s.fail("b", "http-500")
+    assert "b" in s.errors
+
+
 def test_save_load_roundtrip(tmp_path):
     s = CrawlState(seeds=["https://x.gr/seed"])
     s.add_many(["https://x.gr/a", "https://x.gr/b"])

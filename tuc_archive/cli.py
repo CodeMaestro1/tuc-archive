@@ -165,6 +165,13 @@ def resume(
              "this if the original crawl used --category-only, else scope widens "
              "to the whole forum on resume.",
     ),
+    retry_errors: bool = typer.Option(
+        False, "--retry-errors",
+        help="Re-queue previously-failed URLs (e.g. transient http-500) for "
+             "another attempt. Best paired with --workers 1 --delay 2 so a "
+             "briefly-overloaded server gets a gentle retry; permanent failures "
+             "simply error again.",
+    ),
     limit: int = typer.Option(0, "--limit", help="Stop after N total pages (0 = unlimited)."),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ):
@@ -175,6 +182,9 @@ def resume(
     s.state_file = Path(state_file)
     state = CrawlState.load(Path(state_file))
     console.print(f"[cyan]Resuming[/]: {state.stats()}")
+    if retry_errors:
+        n = state.requeue_errors()
+        console.print(f"[yellow]Re-queued {n} errored URL(s) for retry.[/]")
     if category_only:
         include = _category_only_include(state.seeds, include)
     _run_crawl(s, state, include, exclude)

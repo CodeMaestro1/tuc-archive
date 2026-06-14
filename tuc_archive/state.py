@@ -112,6 +112,24 @@ class CrawlState:
                     moved += 1
             return moved
 
+    def requeue_errors(self) -> int:
+        """Move ALL previously-errored URLs back to pending for another attempt.
+
+        Used by ``resume --retry-errors``: failures (e.g. transient http-500 from
+        a server briefly overloaded) are not retried automatically, so this opts
+        in to re-fetching them. Genuinely broken URLs will just fail again and
+        return to ``errors``; transient ones recover. They stay in ``_seen`` (so
+        normal link discovery won't duplicate them) while sitting in pending.
+        """
+        with self._lock:
+            moved = 0
+            for u in list(self.errors):
+                self.errors.pop(u, None)
+                if u not in self.completed and u not in self.pending:
+                    self.pending.append(u)
+                    moved += 1
+            return moved
+
     def requeue_stale(self, timeout: float) -> int:
         """Re-queue in-flight URLs older than ``timeout`` (dead worker)."""
         with self._lock:
