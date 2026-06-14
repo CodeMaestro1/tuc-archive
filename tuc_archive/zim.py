@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import datetime
 import logging
+import re
 import struct
 import zlib
 from pathlib import Path
@@ -307,7 +308,7 @@ class ZimBuilder:
             zpath = self._page_paths.get(meta["url"])
             if zpath is None:
                 continue  # page filtered out of this build
-            ttl = meta.get("title") or meta["url"]
+            ttl = self._clean_title(meta.get("title") or "") or meta["url"]
             if self._scrub_pii:
                 ttl = scrub_pii_text(ttl)
             for p in (meta.get("posts") or []):
@@ -355,21 +356,138 @@ class ZimBuilder:
         log.info("Author index: %d authors", len(authors))
         return len(authors)
 
+    # Site <title> on non-topic pages is the generic forum name; detect it so we
+    # can fall back to the breadcrumb for a meaningful label.
+    _GENERIC_TITLE = re.compile(r"Νέα\s*/\s*Ανακοινώσεις|Πολυτεχνείο Κρήτης\s*$")
+    # the forum <h1> appends a reads/subscriptions counter to the topic title
+    _TITLE_NOISE = re.compile(r"\s*Αναγνώσεις:.*$|\s*Συνδρομές:.*$", re.S)
+
+    @classmethod
+    def _clean_title(cls, t: str) -> str:
+        t = cls._TITLE_NOISE.sub("", t or "")
+        return re.sub(r"\s+", " ", t).strip()
+
+    _TS_RX = re.compile(r"(\d{2})-(\d{2})-(\d{4})(?:\s+(\d{2}):(\d{2}))?")
+
+    @classmethod
+    def _parse_ts(cls, s: str):
+        """Parse a forum timestamp 'DD-MM-YYYY HH:MM' -> datetime, else None."""
+        m = cls._TS_RX.search(s or "")
+        if not m:
+            return None
+        d, mo, y, h, mi = (int(x) if x else 0 for x in m.groups())
+        try:
+            return datetime.datetime(y, mo, d, h, mi)
+        except ValueError:
+            return None
+
+    @classmethod
+    def _page_date(cls, meta: dict):
+        """Earliest post timestamp on a page (a topic's first page = creation)."""
+        ds = [cls._parse_ts(p.get("timestamp")) for p in (meta.get("posts") or [])]
+        ds = [d for d in ds if d]
+        return min(ds) if ds else None
+
+    def _page_label(self, url: str, meta: dict) -> str:
+        """Best human label for a page: real <title> → last breadcrumb crumb →
+        title with the site suffix stripped → URL tail."""
+        t = (meta.get("title") or "").strip()
+        if t and not self._GENERIC_TITLE.search(t):
+            return self._clean_title(t)
+        bc = meta.get("breadcrumb") or []
+        if bc:
+            last = bc[-1]
+            if isinstance(last, str) and last.strip():
+                return self._clean_title(last)
+        if t:  # strip "... - Πολυτεχνείο Κρήτης"
+            cleaned = re.sub(r"\s*[-–]\s*Πολυτεχνείο Κρήτης\s*$", "", t).strip()
+            if cleaned:
+                return self._clean_title(cleaned)
+        return url.rsplit("/", 1)[-1] or url
+
     def _add_homepage(self, creator: Creator, title: str, description: str,
                       with_authors: bool = False):
-        items = "".join(
-            f'<li><a href="{p}">{(self.store.page_meta(u) or {}).get("title") or u}</a></li>'
-            for u, p in sorted(self._page_paths.items(), key=lambda kv: kv[1])
+        import html as _html
+
+        topics: dict[str, dict] = {}   # topic id -> {label, path, min_page, count}
+        cats: dict[str, dict] = {}     # cat id   -> {label, path, min_page, count}
+        other: list[tuple[str, str]] = []  # (label, path)
+
+        for u, p in self._page_paths.items():
+            meta = self.store.page_meta(u) or {}
+            label = self._page_label(u, meta)
+            date = self._page_date(meta)
+            mt = re.search(r"/topic/(\d+)/page(?:/(\d+))?", u)
+            mc = re.search(r"/cat/(\d+)/page(?:/(\d+)|-(\d+))?", u)
+            if mt:
+                tid, pg = mt.group(1), int(mt.group(2) or 1)
+                self._collapse(topics, tid, label, p, pg, date)
+            elif mc:
+                cid, pg = mc.group(1), int(mc.group(2) or mc.group(3) or 1)
+                self._collapse(cats, cid, label, p, pg, date)
+            else:
+                other.append((label, p))
+
+        def li(e):
+            d = e["date"].strftime("%d-%m-%Y") if e.get("date") else ""
+            bits = " · ".join(x for x in (d, (f'{e["count"]} σελ.' if e["count"] > 1 else "")) if x)
+            extra = f' <small>· {bits}</small>' if bits else ""
+            return f'<li><a href="{e["path"]}">{_html.escape(e["label"])}</a>{extra}</li>'
+
+        # topics: chronological, NEWEST FIRST (by creation date); undated last
+        def by_date_desc(e):
+            return (e["date"] is not None, e["date"] or datetime.datetime.min)
+        topic_items = "".join(
+            li(e) for e in sorted(topics.values(), key=by_date_desc, reverse=True)
         )
+        # categories have no meaningful date -> keep alphabetical
+        cat_items = "".join(
+            li(e) for e in sorted(cats.values(), key=lambda e: e["label"].lower())
+        )
+        other_items = "".join(
+            li({"label": lbl, "path": pth, "count": 1, "date": None})
+            for lbl, pth in sorted(other, key=lambda x: x[0].lower())
+        )
+
+        sections = []
+        if topic_items:
+            sections.append(f"<h2>Θέματα ({len(topics)})</h2><ul>{topic_items}</ul>")
+        if cat_items:
+            sections.append(f"<h2>Κατηγορίες ({len(cats)})</h2><ul>{cat_items}</ul>")
+        if other_items:
+            sections.append(f"<h2>Άλλες σελίδες</h2><ul>{other_items}</ul>")
+
         authors_link = (
             '<p><a href="authors/index.html"><b>Αναζήτηση ανά συντάκτη →</b></a></p>'
             if with_authors else ""
         )
         html = _HOMEPAGE.format(
             title=title, desc=description, n=len(self._page_paths),
-            items=items, authors=authors_link,
+            items="".join(sections), authors=authors_link,
         )
         creator.add_item_for(
             path="index.html", title=title, content=html.encode("utf-8"),
             mimetype="text/html", is_front=True, duplicate_ok=True,
         )
+
+    @staticmethod
+    def _collapse(group: dict, key: str, label: str, path: str, page_no: int,
+                  date=None):
+        """Merge paginated pages of one topic/category into a single entry that
+        links the FIRST page, counts pages, and keeps the earliest (creation)
+        post date for chronological sorting."""
+        e = group.get(key)
+        if e is None:
+            group[key] = {"label": label, "path": path,
+                          "min_page": page_no, "count": 1, "date": date}
+            return
+        e["count"] += 1
+        # prefer the lowest page number's path as the entry link
+        if page_no < e["min_page"]:
+            e["min_page"], e["path"] = page_no, path
+        # upgrade a URL-tail fallback (no spaces) to a real title (has spaces)
+        if " " not in e["label"] and " " in label:
+            e["label"] = label
+        # keep the earliest known post date (topic creation)
+        if date and (e["date"] is None or date < e["date"]):
+            e["date"] = date
