@@ -251,9 +251,12 @@ by reading it back with `libzim`.
 
 ## License
 
+Copyright (C) 2026 Konstantinos Pisimisis ([CodeMaestro1](https://github.com/CodeMaestro1)).
+
 **GNU AGPL-3.0-only** — see [`LICENSE`](LICENSE). Copyleft with a network clause:
 if you run a modified version as a network service, you must offer its source to
-users. Forks and redistributions must stay under AGPL-3.0.
+users. Forks and redistributions must stay under AGPL-3.0 and **keep the
+copyright and license notices intact**.
 
 ## Legal / ethical use
 

@@ -9,7 +9,7 @@ description = "Archive a login-protected TYPO3 (tx_tucforum) forum into an offli
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "AGPL-3.0-only" }
-authors = [{ name = "Soteria" }]
+authors = [{ name = "Konstantinos Pisimisis (CodeMaestro1)" }]
 keywords = ["typo3", "tucforum", "zim", "kiwix", "archive", "crawler"]
 
 dependencies = [
